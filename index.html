@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synced Lyrics Player</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <h1>🎤 Synced Lyrics</h1>
+    <p class="sub">Paste a YouTube link — it finds the lyrics and shows them in time with the song.</p>
+
+    <form id="form">
+      <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" required>
+      <button id="go" type="submit">Load</button>
+    </form>
+
+    <p id="status" class="status" hidden></p>
+
+    <section id="libraryWrap" hidden>
+      <h2 class="lib-title">Your songs</h2>
+      <div id="library" class="library"></div>
+    </section>
+
+    <section id="player" hidden>
+      <div id="meta" class="meta"></div>
+      <button id="sharpen" type="button" class="sharpen" hidden>🎯 Sharpen timing (AI, slow once)</button>
+      <div id="sharpenBar" class="sharpen-bar" hidden><div id="sharpenFill" class="sharpen-fill"></div></div>
+      <audio id="audio" controls preload="auto"></audio>
+      <div id="lyrics" class="lyrics" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
