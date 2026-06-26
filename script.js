@@ -15,8 +15,12 @@ const libraryEl = document.getElementById("library");
 const sharpenBtn = document.getElementById("sharpen");
 const sharpenBar = document.getElementById("sharpenBar");
 const sharpenFill = document.getElementById("sharpenFill");
+const offsetVal = document.getElementById("offsetVal");
+const setStartBtn = document.getElementById("setStart");
 
 let currentSongId = null;   // audioId of the song currently loaded
+let currentData = null;     // full payload of the loaded song
+let currentOffset = 0;      // manual lyric-timing offset (seconds)
 
 let lines = [];          // [{ time, text }]
 let lineNodes = [];      // matching line DOM nodes
@@ -164,6 +168,9 @@ function loadSong(data) {
   activeIndex = -1;
   displayedWord = -1;
   lastAdvanceAt = 0;
+  currentData = data;
+  currentOffset = Number(data.offset) || 0;
+  updateOffsetLabel();
 
   const name = data.track || data.title || "Unknown";
   const artist = data.artist ? `${data.artist} — ` : "";
@@ -208,18 +215,18 @@ function handleAlignEvent(ev) {
   if (ev.phase === "error") {
     throw new Error(ev.message || "Alignment failed.");
   }
-  if (ev.phase === "separating") {
-    setProgress(ev.percent, "Isolating vocals…");
-  } else if (ev.phase === "aligning") {
-    setProgress(ev.percent, "Aligning words…");
-  } else if (ev.phase === "done") {
+  if (ev.phase === "done") {
     setProgress(100, "Done");
     const at = audio.currentTime;
     loadSong(ev.song);            // refreshes lyrics + button (now "sharpened")
     audio.currentTime = at;       // keep the listener's place
     sharpenBar.hidden = true;
     setStatus("");
+    return;
   }
+  // Every other phase (loading / syncing / separating / aligning) just shows
+  // its own description from the backend, so nothing is ever silently ignored.
+  setProgress(ev.percent, ev.detail || "Working…");
 }
 
 sharpenBtn.addEventListener("click", async () => {
@@ -258,6 +265,43 @@ sharpenBtn.addEventListener("click", async () => {
   }
 });
 
+// --- manual intro-sync offset -------------------------------------------
+
+function updateOffsetLabel() {
+  offsetVal.textContent = `${currentOffset >= 0 ? "+" : ""}${currentOffset.toFixed(1)}s`;
+}
+
+async function applyOffset(newOffset) {
+  if (!currentData) return;
+  currentOffset = Math.round(newOffset * 10) / 10;   // 0.1s steps
+  updateOffsetLabel();
+  // Re-render lyrics with the new offset, keeping playback position.
+  displayedWord = -1;
+  activeIndex = -1;
+  renderLyrics(currentData);
+  // Persist for next time.
+  try {
+    await fetch(`/offset/${encodeURIComponent(currentSongId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ offset: currentOffset }),
+    });
+    if (currentData) currentData.offset = currentOffset;
+  } catch { /* non-critical */ }
+}
+
+document.querySelectorAll(".sync-btn[data-nudge]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    applyOffset(currentOffset + parseFloat(btn.dataset.nudge));
+  });
+});
+
+setStartBtn.addEventListener("click", () => {
+  if (!currentData || !lines.length) return;
+  // Shift so the first lyric line lands at the current playback position.
+  applyOffset(audio.currentTime - lines[0].time);
+});
+
 function renderLyrics(data) {
   lyricsEl.innerHTML = "";
   lineNodes = [];
@@ -278,7 +322,7 @@ function renderLyrics(data) {
     const div = document.createElement("div");
     div.className = "line";
     div.addEventListener("click", () => {
-      audio.currentTime = line.time;
+      audio.currentTime = line.time + currentOffset;
       audio.play().catch(() => {});
     });
 
@@ -305,10 +349,10 @@ function renderLyrics(data) {
         w.textContent = tok;
         div.appendChild(w);
         if (j < tokens.length - 1) div.appendChild(document.createTextNode(" "));
-        const time = aligned
+        const baseTime = aligned
           ? line.words[j].time
           : lineStart + (j / tokens.length) * span;
-        allWords.push({ span: w, time, lineIndex: i });
+        allWords.push({ span: w, time: baseTime + currentOffset, lineIndex: i });
       });
     }
 

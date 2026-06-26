@@ -7,6 +7,10 @@ Then open http://localhost:8000
 
 from __future__ import annotations
 
+import os
+# Allow torch + faster-whisper (CTranslate2) to coexist (duplicate OpenMP runtime).
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import json
 import mimetypes
 from pathlib import Path
@@ -28,6 +32,10 @@ app = FastAPI(title="Synced-Lyrics Player")
 
 class ProcessRequest(BaseModel):
     url: str
+
+
+class OffsetRequest(BaseModel):
+    offset: float
 
 
 @app.post("/process")
@@ -101,6 +109,17 @@ def delete_song(audio_id: str):
     return {"deleted": audio_id}
 
 
+@app.post("/offset/{audio_id}")
+def set_offset(audio_id: str, req: OffsetRequest):
+    """Save a manual lyric-timing offset (seconds) for a song."""
+    data = library.load(audio_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Song not found in library.")
+    data["offset"] = round(float(req.offset), 2)
+    library.save(data)
+    return {"audioId": audio_id, "offset": data["offset"]}
+
+
 def _sse(obj) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
@@ -129,6 +148,11 @@ def align_song(audio_id: str):
                 library.save(data)
             yield _sse({"phase": "done", "percent": 100, "song": data})
             return
+
+        # Tell the browser something is happening before the (slow, first-run)
+        # import of the AI stack so the bar doesn't sit silently at 0%.
+        yield _sse({"phase": "loading", "percent": 1,
+                    "detail": "Loading AI models (first run can take ~30s)…"})
 
         from . import align  # heavy import (torch/torchaudio/demucs)
         try:

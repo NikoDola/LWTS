@@ -16,8 +16,16 @@ caller, so it only happens once per song.
 
 from __future__ import annotations
 
+import os
+# torch and faster-whisper (CTranslate2) each ship an OpenMP runtime; loading
+# both in one process trips an init error. Allow the duplicate before they load.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import difflib
 import re
+import statistics
 import unicodedata
+from collections import Counter
 from typing import Dict, List
 
 import torch
@@ -189,8 +197,75 @@ def _align_line(vocals: torch.Tensor, total_sec: float, disp_words: List[str],
     return result
 
 
+# --- global intro-offset detection ---------------------------------------
+
+def _lyric_word_times(lines: List[dict]):
+    """Flatten lyric lines into [(normalized_word, approx_time)] using LRCLIB
+    line times with even within-line interpolation."""
+    out = []
+    n = len(lines)
+    for i, line in enumerate(lines):
+        words = (line.get("text") or "").split()
+        if not words:
+            continue
+        start = float(line["time"])
+        end = float(lines[i + 1]["time"]) if i + 1 < n else start + LAST_LINE_SECONDS
+        span = max(0.001, end - start)
+        for j, w in enumerate(words):
+            nw = _normalize(w)
+            if nw:
+                out.append((nw, start + (j / len(words)) * span))
+    return out
+
+
+def detect_offset(audio_path: str, lines: List[dict]) -> float:
+    """Estimate a global time shift between LRCLIB timing and this recording.
+
+    Transcribes the audio (Whisper understands *content*, so it tells spoken
+    intros apart from sung lyrics), matches the transcript to the known lyrics,
+    and takes the median time difference. Returns 0.0 when it can't tell.
+    """
+    from . import transcribe
+    try:
+        whisper_words = transcribe.transcribe_words(audio_path)
+    except Exception:
+        return 0.0
+
+    wnorm = [(_normalize(w), t) for w, t in whisper_words]
+    wnorm = [(w, t) for w, t in wnorm if w]
+    lyric = _lyric_word_times(lines)
+    if len(wnorm) < 5 or len(lyric) < 5:
+        return 0.0
+
+    sm = difflib.SequenceMatcher(
+        None, [w for w, _ in lyric], [w for w, _ in wnorm], autojunk=False
+    )
+    diffs = []
+    for block in sm.get_matching_blocks():
+        for k in range(block.size):
+            diffs.append(wnorm[block.b + k][1] - lyric[block.a + k][1])
+    if len(diffs) < 8:
+        return 0.0
+
+    # Repeated lyrics (choruses) create spurious matches, so the median is
+    # unreliable. The true offset is the dominant *cluster* of time-differences.
+    # Bin to 1 s, take the largest clusters, and prefer the earliest one (chorus
+    # repeats show up as larger-offset harmonics of the real shift).
+    binned = Counter(round(d) for d in diffs)
+    max_count = max(binned.values())
+    candidates = [b for b, c in binned.items() if c >= 0.5 * max_count]
+    chosen = min(candidates)
+    cluster = [d for d in diffs if abs(d - chosen) <= 1.5]
+    if len(cluster) < max(8, 0.12 * len(diffs)):
+        return 0.0
+
+    offset = statistics.median(cluster)
+    return round(offset, 2) if abs(offset) > 1.0 else 0.0
+
+
 # Progress budget: vocal separation is the slow part, so it owns most of the bar.
-_SEP_FROM, _SEP_TO = 2, 78        # percent range covered by separation
+_SYNC_TO = 14                     # percent reached after offset detection
+_SEP_FROM, _SEP_TO = 14, 78       # percent range covered by separation
 _ALIGN_FROM, _ALIGN_TO = 78, 99   # percent range covered by per-line alignment
 
 
@@ -198,8 +273,22 @@ def align_stream(audio_path: str, lines: List[dict]):
     """Generator yielding progress dicts, ending with a final lyrics payload.
 
     Events: {"phase","percent","detail"} during work, then
-            {"phase":"done","percent":100,"lyrics":[...]}.
+            {"phase":"done","percent":100,"lyrics":[...],"autoOffset":float}.
     """
+    # 1) Detect & apply a global intro/timing offset so per-line windows land on
+    #    the real singing (e.g. music videos with a long spoken intro).
+    yield {"phase": "syncing", "percent": 3,
+           "detail": "Finding where the lyrics start…"}
+    offset = detect_offset(audio_path, lines)
+    if offset:
+        lines = [{**ln, "time": max(0.0, float(ln["time"]) + offset)} for ln in lines]
+        yield {"phase": "syncing", "percent": _SYNC_TO,
+               "detail": f"Shifted lyrics by {offset:+.1f}s to match this video"}
+    else:
+        yield {"phase": "syncing", "percent": _SYNC_TO,
+               "detail": "No intro offset needed"}
+
+    # 2) Separate vocals.
     yield {"phase": "separating", "percent": _SEP_FROM,
            "detail": "Loading model & isolating vocals…"}
 
@@ -208,7 +297,7 @@ def align_stream(audio_path: str, lines: List[dict]):
         if kind == "progress":
             pct = _SEP_FROM + int(val * (_SEP_TO - _SEP_FROM))
             yield {"phase": "separating", "percent": pct,
-                   "detail": f"Isolating vocals… {int(val * 100)}%"}
+                   "detail": "Isolating vocals from the music…"}
         else:
             vocals = val
 
@@ -238,7 +327,7 @@ def align_stream(audio_path: str, lines: List[dict]):
         yield {"phase": "aligning", "percent": pct,
                "detail": f"Aligning words… line {i + 1}/{n}"}
 
-    yield {"phase": "done", "percent": 100, "lyrics": out}
+    yield {"phase": "done", "percent": 100, "lyrics": out, "autoOffset": offset}
 
 
 def align(audio_path: str, lines: List[dict]) -> List[dict]:

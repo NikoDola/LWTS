@@ -27,6 +27,15 @@
       <div id="meta" class="meta"></div>
       <button id="sharpen" type="button" class="sharpen" hidden>🎯 Sharpen timing (AI, slow once)</button>
       <div id="sharpenBar" class="sharpen-bar" hidden><div id="sharpenFill" class="sharpen-fill"></div></div>
+      <div id="syncRow" class="sync-row">
+        <span class="sync-label">Intro sync</span>
+        <button type="button" class="sync-btn" data-nudge="-1">−1s</button>
+        <button type="button" class="sync-btn" data-nudge="-0.2">−0.2s</button>
+        <span id="offsetVal" class="offset-val">0.0s</span>
+        <button type="button" class="sync-btn" data-nudge="0.2">+0.2s</button>
+        <button type="button" class="sync-btn" data-nudge="1">+1s</button>
+        <button type="button" id="setStart" class="sync-btn set-start">⏱ Lyrics start here</button>
+      </div>
       <audio id="audio" controls preload="auto"></audio>
       <div id="lyrics" class="lyrics" aria-live="polite"></div>
     </section>

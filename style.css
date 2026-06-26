@@ -184,6 +184,34 @@ h1 { margin: 0 0 .25rem; font-size: 1.8rem; }
   transition: width .3s ease;
 }
 
+.sync-row {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  font-size: .85rem;
+}
+.sync-label { color: var(--muted); margin-right: .25rem; }
+.sync-btn {
+  padding: .3rem .6rem;
+  border: 1px solid #2a2d37;
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: .8rem;
+  cursor: pointer;
+}
+.sync-btn:hover { border-color: var(--accent); }
+.sync-btn.set-start { margin-left: .35rem; }
+.offset-val {
+  min-width: 3.2rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: 600;
+}
+
 audio { width: 100%; margin-bottom: 1.25rem; }
 
 .lyrics {

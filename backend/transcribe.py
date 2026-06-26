@@ -50,3 +50,22 @@ def transcribe(audio_path: str, language: Optional[str] = None) -> List[Line]:
         if text:
             lines.append(Line(time=round(float(seg.start), 3), text=text))
     return lines
+
+
+def transcribe_words(audio_path: str):
+    """Return [(word_text, start_seconds), ...] for the whole audio.
+
+    Used to find where the real lyrics begin (to detect a global intro offset).
+    """
+    model = _get_model()
+    segments, _info = model.transcribe(
+        audio_path,
+        word_timestamps=True,
+        vad_filter=False,          # keep everything; we want spoken intros too
+        beam_size=5,
+    )
+    words = []
+    for seg in segments:
+        for w in (seg.words or []):
+            words.append((w.word, float(w.start)))
+    return words
