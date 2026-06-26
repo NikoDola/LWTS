@@ -247,8 +247,10 @@ audio { width: 100%; margin-bottom: 1.25rem; }
 .lyrics .line .word {
   border-radius: 4px;
   padding: 0 .12em;
+  cursor: pointer;
   transition: background-color .08s linear, color .08s linear;
 }
+.lyrics .line .word:hover { background-color: rgba(110, 168, 254, .25); }
 .lyrics .line .word.sung {
   background-color: #e02424;
   color: #ffffff;

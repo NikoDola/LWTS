@@ -352,7 +352,14 @@ function renderLyrics(data) {
         const baseTime = aligned
           ? line.words[j].time
           : lineStart + (j / tokens.length) * span;
-        allWords.push({ span: w, time: baseTime + currentOffset, lineIndex: i });
+        const wordTime = baseTime + currentOffset;
+        // Click a word -> jump the track to exactly that word.
+        w.addEventListener("click", (e) => {
+          e.stopPropagation();            // don't fall back to the line's seek
+          audio.currentTime = wordTime;
+          audio.play().catch(() => {});
+        });
+        allWords.push({ span: w, time: wordTime, lineIndex: i });
       });
     }
 
