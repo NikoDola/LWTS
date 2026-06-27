@@ -11,6 +11,13 @@ import os
 # Allow torch + faster-whisper (CTranslate2) to coexist (duplicate OpenMP runtime).
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+# Load API keys etc. from a .env file in the project root (if present).
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import json
 import mimetypes
 from pathlib import Path
@@ -36,6 +43,16 @@ class ProcessRequest(BaseModel):
 
 class OffsetRequest(BaseModel):
     offset: float
+
+
+class LineEdit(BaseModel):
+    index: int
+    text: str
+
+
+class WordRequest(BaseModel):
+    word: str
+    sentence: str = ""
 
 
 @app.post("/process")
@@ -118,6 +135,117 @@ def set_offset(audio_id: str, req: OffsetRequest):
     data["offset"] = round(float(req.offset), 2)
     library.save(data)
     return {"audioId": audio_id, "offset": data["offset"]}
+
+
+@app.patch("/lyrics/{audio_id}")
+def edit_line(audio_id: str, req: LineEdit):
+    """Manually correct a single lyric line's text (e.g. fix an AI mishearing).
+
+    The corrected text is saved to the song's meta.json — that persisted file is
+    the trusted record of "right words". Editing a line drops its per-word
+    alignment (the old word-times no longer match the new text); the line keeps
+    its start `time`, so rendering falls back to even word spacing.
+    """
+    data = library.load(audio_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Song not found in library.")
+
+    lyrics = data.get("lyrics") or []
+    if not 0 <= req.index < len(lyrics):
+        raise HTTPException(status_code=400, detail="Line index out of range.")
+
+    line = lyrics[req.index]
+    line["text"] = (req.text or "").strip()
+    line.pop("words", None)        # stale alignment — word-times no longer match
+    line["edited"] = True          # marker for the future cross-song word DB
+
+    # Drop the now-mismatched whole-song translation for this line, if any.
+    translations = data.get("translations")
+    if isinstance(translations, list) and req.index < len(translations):
+        translations[req.index] = ""
+
+    library.save(data)
+    return data
+
+
+@app.post("/word")
+def explain_word(req: WordRequest):
+    """Translate + grammar-explain a single lyric word (language learning)."""
+    import os
+
+    from . import analyze  # lazy import (openai SDK)
+
+    # Cached words are served without needing a key (cross-song reuse).
+    hit = analyze.cached_word(req.word)
+    if hit is not None:
+        return hit
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(
+            status_code=400,
+            detail="Set OPENAI_API_KEY in .env and restart the server to use word translation.",
+        )
+
+    try:
+        return analyze.analyze_word(req.word, req.sentence)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Word lookup failed: {e}")
+
+
+@app.post("/translate/{audio_id}")
+def translate_song(audio_id: str):
+    """Translate the whole song's lyrics to English (chunked, streamed, cached)."""
+    import os
+
+    data = library.load(audio_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Song not found in library.")
+
+    lyrics = data.get("lyrics") or []
+    line_idx = [i for i, l in enumerate(lyrics) if (l.get("text") or "").strip()]
+
+    def stream():
+        # Already translated? Serve from the saved song (no key, no model call).
+        existing = data.get("translations")
+        if isinstance(existing, list) and len(existing) == len(lyrics):
+            yield _sse({"phase": "done", "percent": 100, "song": data})
+            return
+
+        if not line_idx:
+            data["translations"] = [""] * len(lyrics)
+            data["translated"] = True
+            library.save(data)
+            yield _sse({"phase": "done", "percent": 100, "song": data})
+            return
+
+        if not os.environ.get("OPENAI_API_KEY"):
+            yield _sse({"phase": "error",
+                        "message": "Set OPENAI_API_KEY (or Ollama) in .env and restart."})
+            return
+
+        from . import analyze  # lazy import
+        translations = [""] * len(lyrics)
+        chunk = 10
+        total = len(line_idx)
+        try:
+            for start in range(0, total, chunk):
+                group = line_idx[start:start + chunk]
+                outs = analyze.translate_lines([lyrics[i]["text"] for i in group])
+                for j, i in enumerate(group):
+                    translations[i] = outs[j] if j < len(outs) else ""
+                done = start + len(group)
+                yield _sse({"phase": "translating",
+                            "percent": int(done / total * 100),
+                            "detail": f"Translating… {done}/{total} lines"})
+
+            data["translations"] = translations
+            data["translated"] = True
+            library.save(data)
+            yield _sse({"phase": "done", "percent": 100, "song": data})
+        except Exception as e:
+            yield _sse({"phase": "error", "message": f"Translation failed: {e}"})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 def _sse(obj) -> str:

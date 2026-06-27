@@ -264,3 +264,121 @@ audio { width: 100%; margin-bottom: 1.25rem; }
 }
 
 .lyrics .empty { color: var(--muted); font-style: italic; }
+
+/* Whole-song English translation shown under each line (toggled). */
+.lyrics .line .line-trans {
+  display: block;
+  font-size: .9rem;
+  color: var(--muted);
+  font-style: italic;
+  margin-top: .15rem;
+}
+.lyrics:not(.show-translation) .line .line-trans { display: none; }
+
+/* Edit mode: every line is an editable field; show them all at full opacity. */
+.lyrics.editing { -webkit-mask-image: none; mask-image: none; }
+.lyrics.editing .line {
+  opacity: 1;
+  cursor: default;
+  transform: none;
+}
+.line-edit {
+  width: 100%;
+  box-sizing: border-box;
+  padding: .35rem .6rem;
+  border: 1px solid #2a2d37;
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 1.1rem;
+  font-family: inherit;
+  text-align: center;
+  transition: border-color .15s;
+}
+.line-edit:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Word translation popup */
+.modal[hidden] { display: none; }   /* author display:flex below would otherwise override [hidden] */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 50;
+}
+.modal-card {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid #2a2d37;
+  border-radius: 16px;
+  width: min(440px, 100%);
+  max-height: 85vh;
+  overflow-y: auto;
+  padding: 1.5rem 1.5rem 1.25rem;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+}
+.modal-close {
+  position: absolute;
+  top: .75rem;
+  right: .75rem;
+  width: 1.9rem;
+  height: 1.9rem;
+  border: none;
+  border-radius: 50%;
+  background: #2a2d37;
+  color: var(--text);
+  cursor: pointer;
+  font-size: .9rem;
+}
+.modal-close:hover { background: #3a3e4a; }
+
+.word-title {
+  margin: 0 2rem .25rem 0;
+  font-size: 1.6rem;
+}
+.word-lang {
+  font-size: .8rem;
+  color: var(--muted);
+  margin-bottom: 1rem;
+}
+.word-meaning-label {
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+  margin-bottom: .15rem;
+}
+.word-translation {
+  font-size: 1.3rem;
+  color: var(--accent);
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+.word-rows { display: grid; grid-template-columns: auto 1fr; gap: .35rem .8rem; }
+.word-rows .k { color: var(--muted); font-size: .85rem; }
+.word-rows .v { font-size: .9rem; }
+.word-extra { margin-top: 1rem; font-size: .9rem; }
+.word-extra .label { color: var(--muted); font-size: .8rem; }
+.word-extra em { color: var(--text); font-style: italic; }
+.word-loading, .word-error { color: var(--muted); padding: .5rem 0; }
+.word-error { color: #ff8a8a; }
+
+.word-replay {
+  margin-top: 1.25rem;
+  width: 100%;
+  padding: .6rem;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--accent);
+  font-size: .95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.word-replay:hover { background: rgba(110, 168, 254, .12); }

@@ -26,6 +26,8 @@
     <section id="player" hidden>
       <div id="meta" class="meta"></div>
       <button id="sharpen" type="button" class="sharpen" hidden>🎯 Sharpen timing (AI, slow once)</button>
+      <button id="translateBtn" type="button" class="sharpen" hidden>🌐 Translate song</button>
+      <button id="editBtn" type="button" class="sharpen" hidden>✏️ Edit lyrics</button>
       <div id="sharpenBar" class="sharpen-bar" hidden><div id="sharpenFill" class="sharpen-fill"></div></div>
       <div id="syncRow" class="sync-row">
         <span class="sync-label">Intro sync</span>
@@ -40,6 +42,15 @@
       <div id="lyrics" class="lyrics" aria-live="polite"></div>
     </section>
   </main>
+
+  <div id="wordModal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="wordTitle">
+      <button id="wordClose" class="modal-close" aria-label="Close">✕</button>
+      <h2 id="wordTitle" class="word-title"></h2>
+      <div id="wordBody" class="word-body"></div>
+      <button id="wordReplay" class="word-replay" type="button">▶ Replay this word</button>
+    </div>
+  </div>
 
   <script src="script.js"></script>
 </body>

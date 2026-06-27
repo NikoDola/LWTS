@@ -1,0 +1,7 @@
+# Secrets — never commit
+.env
+
+# Cached audio, lyrics, models
+backend/cache/
+__pycache__/
+*.pyc

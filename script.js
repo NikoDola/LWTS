@@ -13,14 +13,24 @@ const lyricsEl = document.getElementById("lyrics");
 const libraryWrap = document.getElementById("libraryWrap");
 const libraryEl = document.getElementById("library");
 const sharpenBtn = document.getElementById("sharpen");
+const translateBtn = document.getElementById("translateBtn");
+const editBtn = document.getElementById("editBtn");
 const sharpenBar = document.getElementById("sharpenBar");
 const sharpenFill = document.getElementById("sharpenFill");
 const offsetVal = document.getElementById("offsetVal");
 const setStartBtn = document.getElementById("setStart");
+const wordModal = document.getElementById("wordModal");
+const wordClose = document.getElementById("wordClose");
+const wordTitle = document.getElementById("wordTitle");
+const wordBody = document.getElementById("wordBody");
+const wordReplay = document.getElementById("wordReplay");
+
+let replayTime = 0;   // playback time to jump to when "Replay this word" is clicked
 
 let currentSongId = null;   // audioId of the song currently loaded
 let currentData = null;     // full payload of the loaded song
 let currentOffset = 0;      // manual lyric-timing offset (seconds)
+let editMode = false;       // when on, lyric lines become editable (fix mishearings)
 
 let lines = [];          // [{ time, text }]
 let lineNodes = [];      // matching line DOM nodes
@@ -171,6 +181,7 @@ function loadSong(data) {
   currentData = data;
   currentOffset = Number(data.offset) || 0;
   updateOffsetLabel();
+  lyricsEl.classList.remove("show-translation");   // start hidden each load
 
   const name = data.track || data.title || "Unknown";
   const artist = data.artist ? `${data.artist} — ` : "";
@@ -182,6 +193,8 @@ function loadSong(data) {
 
   currentSongId = data.audioId;
   setSharpenState(data);
+  setTranslateState(data);
+  setEditState(data);
 
   playerEl.hidden = false;
   audio.play().catch(() => { /* autoplay may be blocked; user can press play */ });
@@ -265,6 +278,135 @@ sharpenBtn.addEventListener("click", async () => {
   }
 });
 
+// --- whole-song translation ---------------------------------------------
+
+function isTranslated(data) {
+  return Array.isArray(data && data.translations) && data.translations.length > 0;
+}
+
+function setTranslateState(data) {
+  const hasLyrics = Array.isArray(data.lyrics) && data.lyrics.length > 0;
+  translateBtn.hidden = !hasLyrics;
+  if (!hasLyrics) return;
+  translateBtn.disabled = false;
+  if (isTranslated(data)) {
+    const showing = lyricsEl.classList.contains("show-translation");
+    translateBtn.textContent = showing ? "🌐 Hide translation" : "🌐 Show translation";
+  } else {
+    translateBtn.textContent = "🌐 Translate song";
+  }
+}
+
+translateBtn.addEventListener("click", () => {
+  // Already translated -> just toggle the inline translation on/off (no API).
+  if (isTranslated(currentData)) {
+    const showing = lyricsEl.classList.toggle("show-translation");
+    translateBtn.textContent = showing ? "🌐 Hide translation" : "🌐 Show translation";
+    return;
+  }
+  runTranslate();
+});
+
+async function runTranslate() {
+  if (!currentSongId) return;
+  translateBtn.disabled = true;
+  sharpenBtn.disabled = true;
+  setProgress(0, "Starting…");
+  setStatus("Translating the whole song — one batched pass, saved after (slow on a local model).");
+  try {
+    const res = await fetch(`/translate/${encodeURIComponent(currentSongId)}`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Translation failed (${res.status})`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, sep).trim();
+        buf = buf.slice(sep + 2);
+        if (frame.startsWith("data:")) handleTranslateEvent(JSON.parse(frame.slice(5).trim()));
+      }
+    }
+  } catch (err) {
+    setStatus(err.message || "Translation failed.", true);
+    sharpenBar.hidden = true;
+    sharpenBtn.disabled = false;
+    setTranslateState(currentData);
+  }
+}
+
+function handleTranslateEvent(ev) {
+  if (ev.phase === "error") throw new Error(ev.message || "Translation failed.");
+  if (ev.phase === "done") {
+    setProgress(100, "Done");
+    const at = audio.currentTime;
+    loadSong(ev.song);                  // re-renders lyrics with translations
+    audio.currentTime = at;
+    lyricsEl.classList.add("show-translation");  // reveal what we just made
+    setTranslateState(currentData);
+    sharpenBar.hidden = true;
+    sharpenBtn.disabled = false;
+    setStatus("");
+    return;
+  }
+  setProgress(ev.percent, ev.detail || "Translating…");
+}
+
+// --- manual lyric editing (fix AI mishearings) --------------------------
+
+function setEditState(data) {
+  const hasLyrics = Array.isArray(data.lyrics) && data.lyrics.length > 0;
+  editBtn.hidden = !hasLyrics;
+  if (!hasLyrics && editMode) toggleEditMode(false);
+}
+
+function toggleEditMode(on) {
+  editMode = on;
+  editBtn.textContent = on ? "✓ Done editing" : "✏️ Edit lyrics";
+  editBtn.classList.toggle("aligned", on);
+  lyricsEl.classList.toggle("editing", on);
+  if (on) lyricsEl.classList.remove("show-translation");  // less clutter while editing
+  // Re-render so lines switch between word-spans and editable inputs.
+  displayedWord = -1;
+  activeIndex = -1;
+  if (currentData) renderLyrics(currentData);
+  setTranslateState(currentData);
+}
+
+editBtn.addEventListener("click", () => {
+  if (!currentSongId) return;
+  toggleEditMode(!editMode);
+});
+
+// Persist one corrected line, then refresh from the saved payload.
+async function saveLineEdit(index, text) {
+  if (!currentSongId) return;
+  try {
+    const res = await fetch(`/lyrics/${encodeURIComponent(currentSongId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index, text }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Save failed (${res.status})`);
+    }
+    const song = await res.json();
+    const at = audio.currentTime;
+    loadSong(song);            // re-renders with the corrected line
+    audio.currentTime = at;    // keep the listener's place
+    toggleEditMode(true);      // loadSong reset things; stay in edit mode
+  } catch (err) {
+    setStatus(err.message || "Could not save your edit.", true);
+  }
+}
+
 // --- manual intro-sync offset -------------------------------------------
 
 function updateOffsetLabel() {
@@ -321,6 +463,28 @@ function renderLyrics(data) {
   lines.forEach((line, i) => {
     const div = document.createElement("div");
     div.className = "line";
+
+    // Edit mode: render the line as a text field instead of clickable words.
+    if (editMode) {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "line-edit";
+      input.value = line.text || "";
+      const commit = () => {
+        const next = input.value.trim();
+        if (next && next !== (line.text || "").trim()) saveLineEdit(i, next);
+      };
+      input.addEventListener("blur", commit);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { input.value = line.text || ""; input.blur(); }
+      });
+      div.appendChild(input);
+      lyricsEl.appendChild(div);
+      lineNodes.push(div);
+      return;
+    }
+
     div.addEventListener("click", () => {
       audio.currentTime = line.time + currentOffset;
       audio.play().catch(() => {});
@@ -353,14 +517,23 @@ function renderLyrics(data) {
           ? line.words[j].time
           : lineStart + (j / tokens.length) * span;
         const wordTime = baseTime + currentOffset;
-        // Click a word -> jump the track to exactly that word.
+        // Click a word -> pause and open the translation popup.
+        const sentence = line.text || "";
         w.addEventListener("click", (e) => {
           e.stopPropagation();            // don't fall back to the line's seek
-          audio.currentTime = wordTime;
-          audio.play().catch(() => {});
+          openWordModal(tok, sentence, wordTime);
         });
         allWords.push({ span: w, time: wordTime, lineIndex: i });
       });
+    }
+
+    // Whole-song translation (shown under the line when toggled on).
+    const trans = (data.translations || [])[i];
+    if (trans) {
+      const td = document.createElement("div");
+      td.className = "line-trans";
+      td.textContent = trans;
+      div.appendChild(td);
     }
 
     lyricsEl.appendChild(div);
@@ -468,6 +641,76 @@ function escapeHtml(s) {
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
   ));
 }
+
+// --- word translation popup (language learning) -------------------------
+
+// Click a word -> pause the song and show its translation + grammar.
+async function openWordModal(rawWord, sentence, wordTime) {
+  // Strip surrounding punctuation but keep internal apostrophes/hyphens.
+  const word = rawWord.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "") || rawWord;
+  replayTime = wordTime;
+  audio.pause();
+
+  wordTitle.textContent = word;
+  wordReplay.hidden = false;
+  wordBody.innerHTML = `<p class="word-loading">Looking up “${escapeHtml(word)}”…<br><span style="font-size:.8rem">(a new word can take a moment; it's instant next time)</span></p>`;
+  wordModal.hidden = false;
+
+  try {
+    const res = await fetch("/word", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ word, sentence }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Lookup failed.");
+    renderWord(data);
+  } catch (err) {
+    wordBody.innerHTML = `<p class="word-error">${escapeHtml(err.message || "Lookup failed.")}</p>`;
+    wordReplay.hidden = true;
+  }
+}
+
+function renderWord(d) {
+  const rows = [
+    ["Part of speech", d.part_of_speech],
+    ["Gender", d.gender],
+    ["Number", d.number],
+    ["Base form", d.lemma],
+    ["Tense", d.tense],
+    ["Mood", d.mood],
+    ["Person", d.person],
+  ].filter(([, v]) => v && v !== "—" && v.trim() !== "");
+
+  const rowsHtml = rows
+    .map(([k, v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>`)
+    .join("");
+
+  wordBody.innerHTML =
+    (d.language ? `<div class="word-lang">${escapeHtml(d.language)}</div>` : "") +
+    `<div class="word-meaning-label">English meaning</div>` +
+    `<div class="word-translation">${escapeHtml(d.translation || "")}</div>` +
+    (rowsHtml ? `<div class="word-rows">${rowsHtml}</div>` : "") +
+    (d.example ? `<div class="word-extra"><span class="label">Example</span><br><em>${escapeHtml(d.example)}</em></div>` : "") +
+    (d.note ? `<div class="word-extra"><span class="label">Tip</span><br>${escapeHtml(d.note)}</div>` : "");
+}
+
+function closeWordModal() {
+  wordModal.hidden = true;
+}
+
+wordClose.addEventListener("click", closeWordModal);
+wordModal.addEventListener("click", (e) => {
+  if (e.target === wordModal) closeWordModal();   // backdrop click
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !wordModal.hidden) closeWordModal();
+});
+wordReplay.addEventListener("click", () => {
+  closeWordModal();
+  audio.currentTime = replayTime;
+  audio.play().catch(() => {});
+});
 
 // Show any previously saved songs as soon as the page loads.
 loadLibrary();
