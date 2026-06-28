@@ -20,6 +20,8 @@ except ImportError:
 
 import json
 import mimetypes
+import queue
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -33,6 +35,17 @@ from . import downloader, ffmpeg_setup, library, lyrics, titleparse, transcribe
 ffmpeg_setup.ensure_ffmpeg_on_path()
 
 FRONTEND_DIR = Path(__file__).parent.parent  # serves index.html / script.js / style.css
+
+# Auto-run forced alignment ("sharpening") right after download. On by default;
+# set AUTO_SHARPEN=0 in .env to keep it a manual button instead (it's heavy).
+AUTO_SHARPEN = (os.environ.get("AUTO_SHARPEN", "1").strip().lower()
+                not in ("0", "false", "no", "off", ""))
+
+# Percent budget for the unified /process progress bar, so one bar covers the
+# whole pipeline: download -> lyrics/transcribe -> sharpening.
+_DL_FROM, _DL_TO = 2, 40       # downloading audio
+_LYR_FROM, _LYR_TO = 40, 55    # finding/transcribing lyrics
+_AL_FROM, _AL_TO = 55, 100     # forced-alignment sharpening
 
 app = FastAPI(title="Synced-Lyrics Player")
 
@@ -55,52 +68,150 @@ class WordRequest(BaseModel):
     sentence: str = ""
 
 
+def _friendly_dl_error(e: Exception) -> str:
+    """Map yt-dlp's raw error to something actionable for the user."""
+    msg = str(e)
+    if "sign in to confirm" in msg.lower() or "not a bot" in msg.lower():
+        return (
+            "YouTube asked to confirm you're not a bot. Set "
+            "YTDLP_COOKIES_FROM_BROWSER=chrome (or firefox/edge) in your .env, "
+            "close that browser, and restart the server."
+        )
+    return msg
+
+
+def _download_with_progress(url: str):
+    """Download in a worker thread, yielding ('progress', frac) events as the
+    bytes come in, then a final ('done', SongInfo) — or raising on failure.
+
+    yt-dlp's progress hook fires synchronously inside the (blocking) download,
+    so we run it off-thread and pipe the hook's updates through a queue.
+    """
+    q: queue.Queue = queue.Queue()
+
+    def hook(d):
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            got = d.get("downloaded_bytes") or 0
+            q.put(("progress", (got / total) if total else 0.0))
+
+    def worker():
+        try:
+            q.put(("done", downloader.download(url, progress_hook=hook)))
+        except Exception as e:  # yt-dlp raises many error types
+            q.put(("error", e))
+
+    threading.Thread(target=worker, daemon=True).start()
+    while True:
+        kind, val = q.get()
+        if kind == "error":
+            raise val
+        yield kind, val
+        if kind == "done":
+            return
+
+
 @app.post("/process")
 def process(req: ProcessRequest):
+    """Run the full pipeline (download -> lyrics -> sharpen), streaming progress.
+
+    Emits Server-Sent-Events with {phase, percent, detail} as it works and a
+    final {phase:"done", song:<payload>}. The whole thing shares one progress
+    bar so the user sees continuous movement and a description of each step.
+    """
     url = (req.url or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="Please provide a YouTube URL.")
 
-    # 1) Download audio + read metadata.
-    try:
-        song = downloader.download(url)
-    except Exception as e:  # yt-dlp raises many error types
-        raise HTTPException(status_code=502, detail=f"Could not download audio: {e}")
-
-    # 2) Best-guess artist/track from metadata or title.
-    artist, track = titleparse.parse(song["title"], song["artist"], song["track"])
-
-    # 3) Try LRCLIB for ready-made synced lyrics.
-    result = lyrics.fetch(artist, track, song["title"], song["duration"])
-    source = result["source"]
-    lines = result["lines"]
-
-    # 4) AI fallback: transcribe the audio if no synced lyrics were found.
-    warning = None
-    if not lines and not result["instrumental"]:
+    def stream():
+        # --- 1) Download audio (real byte progress from yt-dlp). ---
+        yield _sse({"phase": "downloading", "percent": _DL_FROM,
+                    "detail": "Starting download…"})
+        song = None
         try:
-            lines = transcribe.transcribe(song["audio_path"])
-            source = "whisper" if lines else "none"
+            for kind, val in _download_with_progress(url):
+                if kind == "progress":
+                    pct = _DL_FROM + int(val * (_DL_TO - _DL_FROM))
+                    yield _sse({"phase": "downloading", "percent": pct,
+                                "detail": f"Downloading audio… {int(val * 100)}%"})
+                else:  # done
+                    song = val
         except Exception as e:
-            # Don't fail the whole request — still let the user play the audio.
-            source = "none"
-            warning = f"Transcription failed: {e}"
+            yield _sse({"phase": "error",
+                        "message": f"Could not download audio: {_friendly_dl_error(e)}"})
+            return
 
-    payload = {
-        "title": song["title"],
-        "artist": artist,
-        "track": track,
-        "audioId": song["audio_id"],
-        "source": source,
-        "instrumental": result["instrumental"],
-        "lyrics": lines,
-    }
-    if warning:
-        payload["warning"] = warning
+        # --- 2) Metadata + lyrics (LRCLIB, then Whisper as a fallback). ---
+        artist, track = titleparse.parse(song["title"], song["artist"], song["track"])
+        yield _sse({"phase": "lyrics", "percent": _LYR_FROM,
+                    "detail": "Looking for synced lyrics…"})
+        result = lyrics.fetch(artist, track, song["title"], song["duration"])
+        source = result["source"]
+        lines = result["lines"]
 
-    # Persist so the song shows up in the library and survives restarts.
-    library.save(payload)
-    return payload
+        warning = None
+        if not lines and not result["instrumental"]:
+            yield _sse({"phase": "transcribing", "percent": _LYR_FROM + 3,
+                        "detail": "No synced lyrics found — transcribing with AI…"})
+            try:
+                lines = transcribe.transcribe(song["audio_path"])
+                source = "whisper" if lines else "none"
+            except Exception as e:
+                source = "none"
+                warning = f"Transcription failed: {e}"
+
+        # Detect the song's language (Italian word lookups are offline; other
+        # languages get a friendly "not supported yet" in the UI).
+        from . import language
+        lang_code = language.detect(" ".join((l.get("text") or "") for l in lines))
+
+        payload = {
+            "title": song["title"],
+            "artist": artist,
+            "track": track,
+            "audioId": song["audio_id"],
+            "thumbnail": song["thumbnail"],
+            "source": source,
+            "instrumental": result["instrumental"],
+            "language": lang_code,
+            "languageName": language.name(lang_code) if lang_code else "",
+            "lyrics": lines,
+        }
+        if warning:
+            payload["warning"] = warning
+        library.save(payload)
+        word_count = sum(len((ln.get("text") or "").split()) for ln in lines)
+        src_label = {"lrclib": "synced lyrics",
+                     "whisper": "AI transcription"}.get(source, "lyrics")
+        yield _sse({"phase": "lyrics", "percent": _LYR_TO,
+                    "detail": (f"Found {len(lines)} lines · {word_count} words "
+                               f"({src_label})" if lines else "No lyrics available")})
+
+        # --- 3) Sharpen timing (forced alignment) right away, if possible. ---
+        if AUTO_SHARPEN and lines:
+            try:
+                yield _sse({"phase": "loading", "percent": _AL_FROM,
+                            "detail": "Loading AI models (first run can take ~30s)…"})
+                from . import align  # heavy import (torch/torchaudio/demucs)
+                for ev in align.align_stream(song["audio_path"], lines):
+                    if ev.get("phase") == "done":
+                        payload["lyrics"] = ev["lyrics"]
+                        payload["aligned"] = True
+                        library.save(payload)
+                    else:
+                        # Remap alignment's own 0–100 into the sharpening band.
+                        pct = _AL_FROM + int(ev.get("percent", 0) / 100
+                                             * (_AL_TO - _AL_FROM))
+                        yield _sse({"phase": "sharpening", "percent": pct,
+                                    "detail": ev.get("detail", "Sharpening timing…")})
+            except Exception as e:
+                # Non-fatal: keep the even-spaced timing and let the user play.
+                yield _sse({"phase": "sharpening", "percent": _AL_TO,
+                            "detail": f"Skipped sharpening ({e})"})
+
+        yield _sse({"phase": "done", "percent": 100, "song": payload})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.get("/library")
@@ -115,6 +226,13 @@ def get_song(audio_id: str):
     data = library.load(audio_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Song not found in library.")
+    # Backfill language detection for songs saved before that feature existed.
+    if "language" not in data and data.get("lyrics"):
+        from . import language
+        code = language.detect(" ".join((l.get("text") or "") for l in data["lyrics"]))
+        data["language"] = code
+        data["languageName"] = language.name(code) if code else ""
+        library.save(data)
     return data
 
 
@@ -170,20 +288,36 @@ def edit_line(audio_id: str, req: LineEdit):
 
 @app.post("/word")
 def explain_word(req: WordRequest):
-    """Translate + grammar-explain a single lyric word (language learning)."""
+    """Translate + grammar-explain a single lyric word (language learning).
+
+    Lookup order: shared word cache -> local Italian dataset (spaCy + Wiktionary,
+    offline & free) -> OpenAI fallback (other languages / dataset misses).
+    """
     import os
 
     from . import analyze  # lazy import (openai SDK)
 
-    # Cached words are served without needing a key (cross-song reuse).
+    # 1) Cached words are served without a key or any model (cross-song reuse).
     hit = analyze.cached_word(req.word)
     if hit is not None:
         return hit
 
+    # 2) Local offline dataset (Italian). Cache the hit so it's instant next time.
+    try:
+        from . import dictionary
+        local = dictionary.lookup(req.word, req.sentence)
+        if local is not None:
+            analyze.save_word(local)
+            return local
+    except Exception:
+        pass  # dataset unavailable (e.g. spaCy/DB missing) -> fall through to AI
+
+    # 3) OpenAI fallback.
     if not os.environ.get("OPENAI_API_KEY"):
         raise HTTPException(
             status_code=400,
-            detail="Set OPENAI_API_KEY in .env and restart the server to use word translation.",
+            detail="Word not in the offline dictionary. Set OPENAI_API_KEY in .env "
+                   "(and restart) to look up words via AI.",
         )
 
     try:

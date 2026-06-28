@@ -6,6 +6,8 @@ const form = document.getElementById("form");
 const urlInput = document.getElementById("url");
 const goBtn = document.getElementById("go");
 const statusEl = document.getElementById("status");
+const procBar = document.getElementById("procBar");
+const procFill = document.getElementById("procFill");
 const playerEl = document.getElementById("player");
 const metaEl = document.getElementById("meta");
 const audio = document.getElementById("audio");
@@ -64,6 +66,62 @@ function setStatus(msg, isError = false) {
   statusEl.classList.toggle("error", isError);
 }
 
+// Read a Server-Sent-Events response, calling onEvent(obj) per `data:` frame.
+async function readSSE(res, onEvent) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf("\n\n")) >= 0) {
+      const frame = buf.slice(0, sep).trim();
+      buf = buf.slice(sep + 2);
+      if (frame.startsWith("data:")) onEvent(JSON.parse(frame.slice(5).trim()));
+    }
+  }
+}
+
+// Top-of-page progress bar for the whole download→lyrics→sharpen pipeline.
+// It eases past the last reported percent between real updates, so the bar
+// keeps visibly moving even during steps the backend can't measure precisely.
+const proc = {
+  shown: 0, target: 0, timer: null,
+  start() {
+    if (!procBar || !procFill) return;   // tolerate a stale/partial page
+    this.shown = 0; this.target = 0;
+    procFill.style.width = "0%";
+    procBar.hidden = false;
+    clearInterval(this.timer);
+    this.timer = setInterval(() => this._tick(), 350);
+  },
+  update(percent, label) {
+    if (typeof percent === "number") this.target = Math.max(this.target, percent);
+    if (label) setStatus(label);
+  },
+  _tick() {
+    if (!procFill) return;
+    const cap = Math.min(99, this.target + 8);   // creep a little past the last real %
+    if (this.shown < cap) {
+      this.shown += Math.max(0.3, (cap - this.shown) * 0.1);
+      procFill.style.width = `${Math.min(this.shown, 99).toFixed(1)}%`;
+    }
+  },
+  finish() {
+    clearInterval(this.timer); this.timer = null;
+    if (!procBar || !procFill) return;
+    procFill.style.width = "100%";
+    setTimeout(() => { procBar.hidden = true; procFill.style.width = "0%"; }, 500);
+  },
+  fail() {
+    clearInterval(this.timer); this.timer = null;
+    if (!procBar || !procFill) return;
+    procBar.hidden = true; procFill.style.width = "0%";
+  },
+};
+
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const url = urlInput.value.trim();
@@ -71,27 +129,37 @@ form.addEventListener("submit", async (e) => {
 
   goBtn.disabled = true;
   playerEl.hidden = true;
-  setStatus("Downloading audio and finding lyrics… (this can take a bit, and longer if AI transcription is needed)");
 
   try {
+    proc.start();
+    proc.update(2, "Starting…");
     const res = await fetch("/process", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
     });
-
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Request failed (${res.status})`);
     }
 
-    const data = await res.json();
-    loadSong(data);
-    setStatus(data.warning || "");
-    if (data.warning) statusEl.classList.add("error");
+    let finalSong = null;
+    await readSSE(res, (ev) => {
+      if (ev.phase === "error") throw new Error(ev.message || "Processing failed.");
+      if (ev.phase === "done") { finalSong = ev.song; return; }
+      proc.update(ev.percent, ev.detail || "Working…");
+    });
+    if (!finalSong) throw new Error("Server finished without returning a song.");
+
+    proc.update(100, "Done");
+    proc.finish();
+    loadSong(finalSong);
+    setStatus(finalSong.warning || "");
+    if (finalSong.warning) statusEl.classList.add("error");
     urlInput.value = "";
     loadLibrary();          // newly saved song now appears as a card
   } catch (err) {
+    proc.fail();
     setStatus(err.message || "Something went wrong.", true);
   } finally {
     goBtn.disabled = false;
@@ -127,9 +195,16 @@ function renderLibrary(songs) {
     const title = s.track || s.title || "Unknown";
     const artist = s.artist || "Unknown artist";
 
+    // Show the real cover art when we have it; if the image fails to load,
+    // fall back to the 🎵 note icon (older songs have no saved thumbnail).
+    const art = s.thumbnail
+      ? `<div class="art"><img src="${escapeHtml(s.thumbnail)}" alt="" loading="lazy" ` +
+        `onerror="this.parentNode.classList.add('art-fallback');this.remove();"></div>`
+      : `<div class="art art-fallback">🎵</div>`;
+
     card.innerHTML =
       `<button class="card-del" title="Delete this song" aria-label="Delete">✕</button>` +
-      `<div class="art">🎵</div>` +
+      art +
       `<div class="card-title">${escapeHtml(title)}</div>` +
       `<div class="card-artist">${escapeHtml(artist)}</div>`;
 
@@ -253,23 +328,7 @@ sharpenBtn.addEventListener("click", async () => {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Alignment failed (${res.status})`);
     }
-    // Read the Server-Sent-Events stream of progress updates.
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let sep;
-      while ((sep = buf.indexOf("\n\n")) >= 0) {
-        const frame = buf.slice(0, sep).trim();
-        buf = buf.slice(sep + 2);
-        if (frame.startsWith("data:")) {
-          handleAlignEvent(JSON.parse(frame.slice(5).trim()));
-        }
-      }
-    }
+    await readSSE(res, handleAlignEvent);
   } catch (err) {
     setStatus(err.message || "Alignment failed.", true);
     sharpenBar.hidden = true;
@@ -288,6 +347,12 @@ function setTranslateState(data) {
   const hasLyrics = Array.isArray(data.lyrics) && data.lyrics.length > 0;
   translateBtn.hidden = !hasLyrics;
   if (!hasLyrics) return;
+  // Translation is Italian-only for now — make that clear for other languages.
+  if (data.language && data.language !== "it") {
+    translateBtn.disabled = true;
+    translateBtn.textContent = `🌐 ${data.languageName || "This language"} not supported yet`;
+    return;
+  }
   translateBtn.disabled = false;
   if (isTranslated(data)) {
     const showing = lyricsEl.classList.contains("show-translation");
@@ -319,20 +384,7 @@ async function runTranslate() {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Translation failed (${res.status})`);
     }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let sep;
-      while ((sep = buf.indexOf("\n\n")) >= 0) {
-        const frame = buf.slice(0, sep).trim();
-        buf = buf.slice(sep + 2);
-        if (frame.startsWith("data:")) handleTranslateEvent(JSON.parse(frame.slice(5).trim()));
-      }
-    }
+    await readSSE(res, handleTranslateEvent);
   } catch (err) {
     setStatus(err.message || "Translation failed.", true);
     sharpenBar.hidden = true;
@@ -653,8 +705,20 @@ async function openWordModal(rawWord, sentence, wordTime) {
 
   wordTitle.textContent = word;
   wordReplay.hidden = false;
-  wordBody.innerHTML = `<p class="word-loading">Looking up “${escapeHtml(word)}”…<br><span style="font-size:.8rem">(a new word can take a moment; it's instant next time)</span></p>`;
   wordModal.hidden = false;
+
+  // Word lookups are Italian-only. For other languages, say so kindly and stop.
+  const lang = currentData && currentData.language;
+  if (lang && lang !== "it") {
+    const name = (currentData && currentData.languageName) || "this language";
+    wordBody.innerHTML =
+      `<p class="word-unsupported">🌍 Word translations are available for <b>Italian</b> only right now.<br><br>` +
+      `This song looks like <b>${escapeHtml(name)}</b>, so I can't look up its words yet — ` +
+      `but you can still play along and replay the line.</p>`;
+    return;
+  }
+
+  wordBody.innerHTML = `<p class="word-loading">Looking up “${escapeHtml(word)}”…<br><span style="font-size:.8rem">(a new word can take a moment; it's instant next time)</span></p>`;
 
   try {
     const res = await fetch("/word", {
@@ -672,6 +736,20 @@ async function openWordModal(rawWord, sentence, wordTime) {
 }
 
 function renderWord(d) {
+  const meanings = Array.isArray(d.meanings) && d.meanings.length
+    ? d.meanings
+    : (d.translation ? [d.translation] : []);
+  // Dictionary results carry a per-meaning examples[]; AI results carry one
+  // combined example string — normalise both to the same shape.
+  const examples = Array.isArray(d.examples) ? d.examples
+    : (d.example ? [{ meaning: d.translation, text: d.example, en: "" }] : []);
+  const exampleFor = (m) => examples.find((e) => e.meaning === m);
+
+  const exHtml = (e) => e
+    ? `<div class="sense-ex"><em>${escapeHtml(e.text)}</em>` +
+      (e.en ? ` — ${escapeHtml(e.en)}` : "") + `</div>`
+    : "";
+
   const rows = [
     ["Part of speech", d.part_of_speech],
     ["Gender", d.gender],
@@ -680,18 +758,35 @@ function renderWord(d) {
     ["Tense", d.tense],
     ["Mood", d.mood],
     ["Person", d.person],
-  ].filter(([, v]) => v && v !== "—" && v.trim() !== "");
-
+  ].filter(([, v]) => v && v !== "-" && v !== "—" && v.trim() !== "");
   const rowsHtml = rows
     .map(([k, v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>`)
     .join("");
 
+  // Multiple meanings (come -> how / as / like): list every one with its example.
+  let meaningsHtml = "";
+  if (meanings.length > 1) {
+    meaningsHtml =
+      `<div class="word-meaning-label">All meanings</div>` +
+      `<ol class="word-senses">` +
+      meanings.map((m) =>
+        `<li><span class="sense-g">${escapeHtml(m)}</span>${exHtml(exampleFor(m))}</li>`
+      ).join("") +
+      `</ol>`;
+  }
+  // Single-meaning words: just show the one example, if any.
+  const singleEx = meanings.length <= 1 && examples[0]
+    ? `<div class="word-extra"><span class="label">Example</span>${exHtml(examples[0])}</div>`
+    : "";
+
   wordBody.innerHTML =
     (d.language ? `<div class="word-lang">${escapeHtml(d.language)}</div>` : "") +
     `<div class="word-meaning-label">English meaning</div>` +
-    `<div class="word-translation">${escapeHtml(d.translation || "")}</div>` +
+    `<div class="word-translation">${escapeHtml(d.translation || meanings[0] || "")}</div>` +
+    (d.detail ? `<div class="word-detail">${escapeHtml(d.detail)}</div>` : "") +
+    meaningsHtml +
+    singleEx +
     (rowsHtml ? `<div class="word-rows">${rowsHtml}</div>` : "") +
-    (d.example ? `<div class="word-extra"><span class="label">Example</span><br><em>${escapeHtml(d.example)}</em></div>` : "") +
     (d.note ? `<div class="word-extra"><span class="label">Tip</span><br>${escapeHtml(d.note)}</div>` : "");
 }
 

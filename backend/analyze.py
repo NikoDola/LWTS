@@ -121,6 +121,19 @@ def _cache_path(word: str) -> Path:
     return WORD_CACHE / f"{key}.json"
 
 
+def save_word(result: dict) -> None:
+    """Persist a word analysis to the shared word cache (keyed by its `word`)."""
+    word = (result or {}).get("word", "")
+    if not _normalize(word):
+        return
+    try:
+        _cache_path(word).write_text(
+            json.dumps(result, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
 def cached_word(word: str):
     """Return the cached analysis for `word`, or None — never calls the API."""
     if not _normalize(word):

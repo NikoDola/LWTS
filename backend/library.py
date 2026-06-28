@@ -71,6 +71,7 @@ def list_all() -> List[dict]:
                 "title": data.get("title", ""),
                 "artist": data.get("artist"),
                 "track": data.get("track"),
+                "thumbnail": data.get("thumbnail"),
                 "savedAt": meta.stat().st_mtime,
             }
         )

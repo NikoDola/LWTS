@@ -109,13 +109,23 @@ h1 { margin: 0 0 .25rem; font-size: 1.8rem; }
 .card .art {
   aspect-ratio: 1 / 1;
   border-radius: 8px;
-  /* Default CSS cover art (no real thumbnail yet). */
-  background: linear-gradient(135deg, #6ea8fe 0%, #b06efe 50%, #fe6ea8 100%);
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 2.2rem;
   margin-bottom: .55rem;
+}
+/* Real cover art fills the square; YouTube thumbs are 16:9 so we crop. */
+.card .art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Gradient + 🎵 note icon used when there's no thumbnail (or it failed). */
+.card .art.art-fallback {
+  background: linear-gradient(135deg, #6ea8fe 0%, #b06efe 50%, #fe6ea8 100%);
 }
 .card .card-title {
   font-size: .92rem;
@@ -355,11 +365,35 @@ audio { width: 100%; margin-bottom: 1.25rem; }
   margin-bottom: .15rem;
 }
 .word-translation {
-  font-size: 1.3rem;
+  font-size: 1.6rem;
   color: var(--accent);
-  font-weight: 600;
+  font-weight: 700;
+  margin-bottom: .5rem;
+}
+/* "compound of …" formation note under the headline — small, for the curious. */
+.word-detail {
+  font-size: .82rem;
+  color: var(--muted);
+  font-style: italic;
   margin-bottom: 1rem;
 }
+/* Full list of meanings (come -> how / as / like) with a per-meaning example. */
+.word-senses {
+  margin: .15rem 0 1rem;
+  padding-left: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+}
+.word-senses .sense-g { font-size: 1rem; color: var(--text); }
+.word-senses .sense-ex,
+.word-extra .sense-ex {
+  font-size: .85rem;
+  color: var(--muted);
+  margin-top: .15rem;
+}
+.word-senses em, .word-extra em { color: var(--text); font-style: italic; }
+
 .word-rows { display: grid; grid-template-columns: auto 1fr; gap: .35rem .8rem; }
 .word-rows .k { color: var(--muted); font-size: .85rem; }
 .word-rows .v { font-size: .9rem; }
@@ -368,6 +402,7 @@ audio { width: 100%; margin-bottom: 1.25rem; }
 .word-extra em { color: var(--text); font-style: italic; }
 .word-loading, .word-error { color: var(--muted); padding: .5rem 0; }
 .word-error { color: #ff8a8a; }
+.word-unsupported { color: var(--text); padding: .5rem 0; line-height: 1.5; }
 
 .word-replay {
   margin-top: 1.25rem;

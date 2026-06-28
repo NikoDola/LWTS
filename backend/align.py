@@ -306,6 +306,15 @@ def align_stream(audio_path: str, lines: List[dict]):
 
     out = []
     n = len(lines)
+    total_words = sum(len((ln.get("text") or "").split()) for ln in lines)
+
+    # Announce what we're about to do so the user sees the scope of the work.
+    yield {"phase": "aligning", "percent": _ALIGN_FROM,
+           "detail": f"Found {total_words} words across {n} lines — "
+                     f"placing each on the vocals…"}
+
+    done_words = 0
+    placed_words = 0     # words we actually pinned to a timestamp
     for i, line in enumerate(lines):
         text = (line.get("text") or "").strip()
         start = float(line["time"])
@@ -323,9 +332,12 @@ def align_stream(audio_path: str, lines: List[dict]):
         )
         out.append({"time": round(start, 3), "text": text, "words": words})
 
+        done_words += len(disp_words)
+        placed_words += len(words)
         pct = _ALIGN_FROM + int((i + 1) / n * (_ALIGN_TO - _ALIGN_FROM))
         yield {"phase": "aligning", "percent": pct,
-               "detail": f"Aligning words… line {i + 1}/{n}"}
+               "detail": f"Aligning words… {done_words}/{total_words} "
+                         f"({placed_words} matched) · line {i + 1}/{n}"}
 
     yield {"phase": "done", "percent": 100, "lyrics": out, "autoOffset": offset}
 

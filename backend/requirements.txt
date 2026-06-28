@@ -1,11 +1,20 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
-yt-dlp>=2024.4.9
+# Keep this fresh: YouTube breakage (e.g. the "not a bot" check) is fixed in
+# newer releases. Run `pip install -U yt-dlp` when downloads start failing.
+yt-dlp>=2026.6.9
 httpx>=0.27
 faster-whisper>=1.0.1
 
-# Word translation / grammar popup (language-learning feature). Needs OPENAI_API_KEY.
+# Word translation / grammar popup (language-learning feature).
+# Offline Italian lookup uses spaCy + a Wiktionary dataset (see backend/build_dict.py);
+# OpenAI is only the fallback for misses / non-Italian songs.
 openai>=1.50
+spacy>=3.7
+# Song language detection (Italian vs Spanish/etc.) for the word popup.
+lingua-language-detector>=2.0
+# Also run once: python -m spacy download it_core_news_md
+#           and: python -m backend.build_dict
 
 # Forced alignment ("Sharpen timing"). Heavy; only needed for that feature.
 # Install torch/torchaudio as a MATCHED pair from the CPU index, e.g.:

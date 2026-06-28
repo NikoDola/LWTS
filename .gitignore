@@ -5,3 +5,7 @@
 backend/cache/
 __pycache__/
 *.pyc
+
+# Built Italian dictionary + the large raw Wiktionary dump (rebuild locally)
+backend/data/*.sqlite
+backend/data/*.jsonl
